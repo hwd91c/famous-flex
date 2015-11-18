@@ -1,7 +1,7 @@
 {
   "main": "src",
   "name": "famous-flex",
-  "version": "0.3.4",
+  "version": "0.3.6",
   "homepage": "https://github.com/IjzerenHein/famous-flex",
   "repository": {
     "type": "git",
@@ -31,7 +31,12 @@
     "datetimepicker",
     "tabbar",
     "tabbarcontroller",
-    "widgets"
+    "coverlayout",
+    "widgets",
+    "autolayout",
+    "cassowary",
+    "visualformat",
+    "vfl"
   ],
   "license": "MIT",
   "ignore": [

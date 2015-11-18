@@ -53,7 +53,7 @@ define(function(require, exports, module) {
     var Drag = require('famous/physics/forces/Drag');
     var Spring = require('famous/physics/forces/Spring');
     var ScrollSync = require('famous/inputs/ScrollSync');
-    var ViewSequence = require('famous/core/ViewSequence');
+    var LinkedListViewSequence = require('./LinkedListViewSequence');
 
     /**
      * Boudary reached detection
@@ -116,7 +116,7 @@ define(function(require, exports, module) {
         this._scroll = {
             activeTouches: [],
             // physics-engine to use for scrolling
-            pe: new PhysicsEngine(),
+            pe: new PhysicsEngine(this.options.scrollPhysicsEngine),
             // particle that represents the scroll-offset
             particle: new Particle(this.options.scrollParticle),
             // drag-force that slows the particle down after a "flick"
@@ -208,8 +208,14 @@ define(function(require, exports, module) {
                 overflow: 'hidden' // overflow mode when useContainer is enabled
             }
         },
+        scrollPhysicsEngine: {
+            // use defaults
+            //velocityCap: undefined,
+            //angularVelocityCap: undefined
+        },
         scrollParticle: {
             // use defaults
+            //mass: 1
         },
         scrollDrag: {
             forceFunction: Drag.FORCE_FUNCTIONS.QUADRATIC,
@@ -628,6 +634,9 @@ define(function(require, exports, module) {
             this._scroll.particleValue = position;
             this._scroll.particle.setPosition1D(position);
             //_log.call(this, 'setParticle.position: ', position, ' (old: ', oldPosition, ', delta: ', position - oldPosition, ', phase: ', phase, ')');
+            if (this._scroll.springValue !== undefined) {
+                this._scroll.pe.wake();
+            }
         }
         if (velocity !== undefined) {
             var oldVelocity = this._scroll.particle.getVelocity1D();
@@ -901,7 +910,6 @@ define(function(require, exports, module) {
         if (this._scroll.scrollToDirection) {
             this._scroll.springPosition = scrollOffset - size[this._direction];
             this._scroll.springSource = SpringSource.GOTONEXTDIRECTION;
-
         }
         else {
             this._scroll.springPosition = scrollOffset + size[this._direction];
@@ -980,8 +988,10 @@ define(function(require, exports, module) {
                     normalizeNextPrev = (scrollOffset >= 0);
                 }
                 else {
-                    this._viewSequence = node._viewSequence;
-                    normalizedScrollOffset = scrollOffset;
+                    if (Math.round(scrollOffset) >= 0) {
+                        this._viewSequence = node._viewSequence;
+                        normalizedScrollOffset = scrollOffset;
+                    }
                 }
             }
             node = node._prev;
@@ -994,7 +1004,7 @@ define(function(require, exports, module) {
         var node = this._nodes.getStartEnumNode(true);
         while (node) {
             if (!node._invalidated || (node.scrollLength === undefined) || node.trueSizeRequested || !node._viewSequence ||
-                ((scrollOffset > 0) && (!this.options.alignment || (node.scrollLength !== 0)))) {
+                ((Math.round(scrollOffset) > 0) && (!this.options.alignment || (node.scrollLength !== 0)))) {
                 break;
             }
             if (this.options.alignment) {
@@ -1055,7 +1065,7 @@ define(function(require, exports, module) {
             var particleValue = this._scroll.particle.getPosition1D();
             //var particleValue = this._scroll.particleValue;
             _setParticle.call(this, particleValue + delta, undefined, 'normalize');
-            //_log.call(this, 'normalized scrollOffset: ', normalizedScrollOffset, ', old: ', scrollOffset, ', particle: ', particleValue + delta);
+            //console.log('normalized scrollOffset: ', normalizedScrollOffset, ', old: ', scrollOffset, ', particle: ', particleValue + delta);
 
             // Adjust scroll spring
             if (this._scroll.springPosition !== undefined) {
@@ -1077,7 +1087,7 @@ define(function(require, exports, module) {
      * following properties. Example:
      * ```javascript
      * {
-     *   viewSequence: {ViewSequence},
+     *   viewSequence: {LinkedListViewSequence},
      *   index: {Number},
      *   renderNode: {renderable},
      *   visiblePerc: {Number} 0..1
@@ -1413,13 +1423,13 @@ define(function(require, exports, module) {
      * When the node is already visible, nothing happens. If the node is not entirely visible
      * the view is scrolled as much as needed to make it entirely visibl.
      *
-     * @param {Number|ViewSequence|Renderable} node index, renderNode or ViewSequence
+     * @param {Number|LinkedListViewSequence|Renderable} node index, renderNode or LinkedListViewSequence
      * @return {ScrollController} this
      */
     ScrollController.prototype.ensureVisible = function(node) {
 
         // Convert argument into renderNode
-        if (node instanceof ViewSequence) {
+        if (node instanceof LinkedListViewSequence) {
             node = node.get();
         }
         else if ((node instanceof Number) || (typeof node === 'number')) {
@@ -1728,6 +1738,18 @@ define(function(require, exports, module) {
         // Determine start & end
         var scrollStart = 0 - Math.max(this.options.extraBoundsSpace[0], 1);
         var scrollEnd = size[this._direction] + Math.max(this.options.extraBoundsSpace[1], 1);
+        if (this.options.paginated && (this.options.paginationMode === PaginationMode.PAGE)) {
+            scrollStart = scrollOffset - this.options.extraBoundsSpace[0];
+            scrollEnd = scrollOffset + size[this._direction] + this.options.extraBoundsSpace[1];
+            if ((scrollOffset + size[this._direction]) < 0) {
+                scrollStart += size[this._direction];
+                scrollEnd += size[this._direction];
+            }
+            else if ((scrollOffset - size[this._direction]) > 0) {
+                scrollStart -= size[this._direction];
+                scrollEnd -= size[this._direction];
+            }
+        }
         if (this.options.layoutAll) {
             scrollStart = -1000000;
             scrollEnd = 1000000;

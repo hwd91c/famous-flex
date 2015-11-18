@@ -113,7 +113,15 @@ define(function(require, exports, module) {
         var bound;
 
         //
-        // reset size & translation
+        // Sanity checks
+        //
+        if (spacing && typeof spacing !== 'number') {
+            console.log('Famous-flex warning: ListLayout was initialized with a non-numeric spacing option. ' + // eslint-disable-line no-console
+                'The CollectionLayout supports an array spacing argument, but the ListLayout does not.');
+        }
+
+        //
+        // Reset size & translation
         //
         set.size[0] = size[0];
         set.size[1] = size[1];
@@ -157,7 +165,7 @@ define(function(require, exports, module) {
             //
             // Get node size
             //
-            nodeSize = getItemSize ? getItemSize(node.renderNode) : itemSize;
+            nodeSize = getItemSize ? getItemSize(node.renderNode, context.size) : itemSize;
             nodeSize = (nodeSize === true) ? context.resolveSize(node, size)[direction] : nodeSize;
 
             //
@@ -214,7 +222,7 @@ define(function(require, exports, module) {
             //
             // Get node size
             //
-            nodeSize = getItemSize ? getItemSize(node.renderNode) : itemSize;
+            nodeSize = getItemSize ? getItemSize(node.renderNode, context.size) : itemSize;
             nodeSize = (nodeSize === true) ? context.resolveSize(node, size)[direction] : nodeSize;
 
             //

@@ -8,8 +8,8 @@
 * @copyright Gloey Apps, 2014/2015
 *
 * @library famous-flex
-* @version 0.3.3
-* @generated 09-06-2015
+* @version 0.3.6
+* @generated 09-11-2015
 */
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
 var View = window.famous.core.View;
@@ -93,16 +93,18 @@ AnimationController.DEFAULT_OPTIONS = {
         fastResize: true,
         zIndex: 10
     },
-    zIndexOffset: 0
+    zIndexOffset: 0,
+    keepHiddenViewsInDOMCount: 0
 };
 var ItemState = {
         NONE: 0,
         HIDE: 1,
         HIDING: 2,
-        SHOW: 3,
-        SHOWING: 4,
-        VISIBLE: 5,
-        QUEUED: 6
+        HIDDEN: 3,
+        SHOW: 4,
+        SHOWING: 5,
+        VISIBLE: 6,
+        QUEUED: 7
     };
 function ViewStackLayout(context, options) {
     var set = {
@@ -117,34 +119,48 @@ function ViewStackLayout(context, options) {
     this._size[1] = context.size[1];
     var views = context.get('views');
     var transferables = context.get('transferables');
-    for (var i = 0; i < Math.min(views.length, 2); i++) {
+    var visibleCount = 0;
+    for (var i = 0; i < views.length; i++) {
         var item = this._viewStack[i];
         switch (item.state) {
+        case ItemState.HIDDEN:
+            context.set(views[i], {
+                size: context.size,
+                translate: [
+                    context.size[0] * 2,
+                    context.size[1] * 2,
+                    0
+                ]
+            });
+            break;
         case ItemState.HIDE:
         case ItemState.HIDING:
         case ItemState.VISIBLE:
         case ItemState.SHOW:
         case ItemState.SHOWING:
-            var view = views[i];
-            context.set(view, set);
-            for (var j = 0; j < transferables.length; j++) {
-                for (var k = 0; k < item.transferables.length; k++) {
-                    if (transferables[j].renderNode === item.transferables[k].renderNode) {
-                        context.set(transferables[j], {
-                            translate: [
-                                0,
-                                0,
-                                set.translate[2]
-                            ],
-                            size: [
-                                context.size[0],
-                                context.size[1]
-                            ]
-                        });
+            if (visibleCount < 2) {
+                visibleCount++;
+                var view = views[i];
+                context.set(view, set);
+                for (var j = 0; j < transferables.length; j++) {
+                    for (var k = 0; k < item.transferables.length; k++) {
+                        if (transferables[j].renderNode === item.transferables[k].renderNode) {
+                            context.set(transferables[j], {
+                                translate: [
+                                    0,
+                                    0,
+                                    set.translate[2]
+                                ],
+                                size: [
+                                    context.size[0],
+                                    context.size[1]
+                                ]
+                            });
+                        }
                     }
                 }
+                set.translate[2] += options.zIndexOffset;
             }
-            set.translate[2] += options.zIndexOffset;
             break;
         }
     }
@@ -311,7 +327,7 @@ function _processAnimations(event) {
         switch (item.state) {
         case ItemState.HIDE:
             item.state = ItemState.HIDING;
-            _startHideAnimation.call(this, item, prevItem, event.size);
+            _initHideAnimation.call(this, item, prevItem, event.size);
             _updateState.call(this);
             break;
         case ItemState.SHOW:
@@ -343,10 +359,14 @@ function _initShowAnimation(item, prevItem, size) {
     if (spec.origin) {
         item.mod.setOrigin(spec.origin);
     }
+    var startShowAnimation = _startShowAnimation.bind(this, item, spec);
+    var waitAndShow = item.wait ? function () {
+            item.wait.then(startShowAnimation, startShowAnimation);
+        } : startShowAnimation;
     if (prevItem) {
-        _initTransferableAnimations.call(this, item, prevItem, _startShowAnimation.bind(this, item, spec));
+        _initTransferableAnimations.call(this, item, prevItem, waitAndShow);
     } else {
-        _startShowAnimation.call(this, item, spec);
+        waitAndShow();
     }
 }
 function _startShowAnimation(item, spec) {
@@ -382,6 +402,14 @@ function _haltItemAtFrame(item, perc) {
         }
     }
 }
+function _initHideAnimation(item, prevItem, size) {
+    var startHideAnimation = _startHideAnimation.bind(this, item, prevItem, size);
+    if (item.wait) {
+        item.wait.then(startHideAnimation, startHideAnimation);
+    } else {
+        startHideAnimation();
+    }
+}
 function _startHideAnimation(item, prevItem, size) {
     var spec = item.options.hide.animation ? item.options.hide.animation.call(undefined, false, size) : {};
     item.endSpec = spec;
@@ -405,7 +433,7 @@ function _startHideAnimation(item, prevItem, size) {
         }
     }
 }
-function _setItemOptions(item, options) {
+function _setItemOptions(item, options, callback) {
     item.options = {
         show: {
             transition: this.options.show.transition || this.options.transition,
@@ -434,16 +462,52 @@ function _setItemOptions(item, options) {
         item.options.transfer.zIndex = options.transfer && options.transfer.zIndex !== undefined ? options.transfer.zIndex : item.options.transfer.zIndex;
         item.options.transfer.fastResize = options.transfer && options.transfer.fastResize !== undefined ? options.transfer.fastResize : item.options.transfer.fastResize;
     }
+    item.showCallback = function () {
+        item.showCallback = undefined;
+        item.state = ItemState.VISIBLE;
+        _updateState.call(this);
+        _endTransferableAnimations.call(this, item);
+        item.endSpec = undefined;
+        item.startSpec = undefined;
+        if (callback) {
+            callback();
+        }
+    }.bind(this);
 }
 function _updateState() {
     var prevItem;
     var invalidated = false;
-    for (var i = 0; i < Math.min(this._viewStack.length, 2); i++) {
+    var hiddenViewCount = 0;
+    var i = 0;
+    while (i < this._viewStack.length) {
+        if (this._viewStack[i].state === ItemState.HIDDEN) {
+            hiddenViewCount++;
+            for (var j = 0; j < this._viewStack.length; j++) {
+                if (this._viewStack[j].state !== ItemState.HIDDEN && this._viewStack[j].view === this._viewStack[i].view) {
+                    this._viewStack[i].view = undefined;
+                    this._renderables.views.splice(i, 1);
+                    this._viewStack.splice(i, 1);
+                    i--;
+                    hiddenViewCount--;
+                    break;
+                }
+            }
+        }
+        i++;
+    }
+    while (hiddenViewCount > this.options.keepHiddenViewsInDOMCount) {
+        this._viewStack[0].view = undefined;
+        this._renderables.views.splice(0, 1);
+        this._viewStack.splice(0, 1);
+        hiddenViewCount--;
+    }
+    for (i = hiddenViewCount; i < Math.min(this._viewStack.length - hiddenViewCount, 2) + hiddenViewCount; i++) {
         var item = this._viewStack[i];
         if (item.state === ItemState.QUEUED) {
             if (!prevItem || prevItem.state === ItemState.VISIBLE || prevItem.state === ItemState.HIDING) {
                 if (prevItem && prevItem.state === ItemState.VISIBLE) {
                     prevItem.state = ItemState.HIDE;
+                    prevItem.wait = item.wait;
                 }
                 item.state = ItemState.SHOW;
                 invalidated = true;
@@ -500,14 +564,13 @@ AnimationController.prototype.show = function (renderable, options, callback) {
         return this.hide(options, callback);
     }
     var item = this._viewStack.length ? this._viewStack[this._viewStack.length - 1] : undefined;
-    if (item && item.view === renderable) {
+    if (item && item.view === renderable && item.state !== ItemState.HIDDEN) {
         item.hide = false;
         if (item.state === ItemState.HIDE) {
             item.state = ItemState.QUEUED;
-            _setItemOptions.call(this, item, options);
+            _setItemOptions.call(this, item, options, callback);
             _updateState.call(this);
-        }
-        if (callback) {
+        } else if (callback) {
             callback();
         }
         return this;
@@ -525,28 +588,15 @@ AnimationController.prototype.show = function (renderable, options, callback) {
         mod: new StateModifier(),
         state: ItemState.QUEUED,
         callback: callback,
-        transferables: []
+        transferables: [],
+        wait: options ? options.wait : undefined
     };
     item.node = new RenderNode(item.mod);
     item.node.add(renderable);
-    _setItemOptions.call(this, item, options);
-    item.showCallback = function () {
-        item.showCallback = undefined;
-        item.state = ItemState.VISIBLE;
-        _updateState.call(this);
-        _endTransferableAnimations.call(this, item);
-        item.endSpec = undefined;
-        item.startSpec = undefined;
-        if (callback) {
-            callback();
-        }
-    }.bind(this);
+    _setItemOptions.call(this, item, options, callback);
     item.hideCallback = function () {
         item.hideCallback = undefined;
-        var index = this._viewStack.indexOf(item);
-        this._renderables.views.splice(index, 1);
-        this._viewStack.splice(index, 1);
-        item.view = undefined;
+        item.state = ItemState.HIDDEN;
         _updateState.call(this);
         this.layout.reflowLayout();
     }.bind(this);
@@ -571,10 +621,8 @@ AnimationController.prototype.hide = function (options, callback) {
         }
     }
     item.hideCallback = function () {
-        var index = this._viewStack.indexOf(item);
-        this._renderables.views.splice(index, 1);
-        this._viewStack.splice(index, 1);
-        item.view = undefined;
+        item.hideCallback = undefined;
+        item.state = ItemState.HIDDEN;
         _updateState.call(this);
         this.layout.reflowLayout();
         if (callback) {
@@ -623,10 +671,7 @@ AnimationController.prototype.abort = function (callback) {
         item.state = ItemState.HIDING;
         item.hideCallback = function () {
             item.hideCallback = undefined;
-            var index = this._viewStack.indexOf(item);
-            this._renderables.views.splice(index, 1);
-            this._viewStack.splice(index, 1);
-            item.view = undefined;
+            item.state = ItemState.HIDDEN;
             _updateState.call(this);
             this.layout.reflowLayout();
         }.bind(this);
@@ -1071,7 +1116,7 @@ FlexScrollView.prototype.commit = function (context) {
     return result;
 };
 module.exports = FlexScrollView;
-},{"./LayoutUtility":8,"./ScrollController":9,"./layouts/ListLayout":17}],3:[function(require,module,exports){
+},{"./LayoutUtility":8,"./ScrollController":10,"./layouts/ListLayout":18}],3:[function(require,module,exports){
 var OptionsManager = window.famous.core.OptionsManager;
 var Transform = window.famous.core.Transform;
 var Vector = window.famous.math.Vector;
@@ -1539,6 +1584,7 @@ module.exports = LayoutContext;
 var Utility = window.famous.utilities.Utility;
 var Entity = window.famous.core.Entity;
 var ViewSequence = window.famous.core.ViewSequence;
+var LinkedListViewSequence = require('./LinkedListViewSequence');
 var OptionsManager = window.famous.core.OptionsManager;
 var EventHandler = window.famous.core.EventHandler;
 var LayoutUtility = require('./LayoutUtility');
@@ -1660,37 +1706,36 @@ LayoutController.prototype.setOptions = function (options) {
     return this;
 };
 function _forEachRenderable(callback) {
-    var dataSource = this._dataSource;
-    if (dataSource instanceof Array) {
-        for (var i = 0, j = dataSource.length; i < j; i++) {
-            callback(dataSource[i]);
-        }
-    } else if (dataSource instanceof ViewSequence) {
-        var renderable;
-        while (dataSource) {
-            renderable = dataSource.get();
-            if (!renderable) {
-                break;
-            }
-            callback(renderable);
-            dataSource = dataSource.getNext();
+    if (this._nodesById) {
+        for (var key in this._nodesById) {
+            callback(this._nodesById[key]);
         }
     } else {
-        for (var key in dataSource) {
-            callback(dataSource[key]);
+        var sequence = this._viewSequence.getHead();
+        while (sequence) {
+            var renderable = sequence.get();
+            if (renderable) {
+                callback(renderable);
+            }
+            sequence = sequence.getNext();
         }
     }
 }
 LayoutController.prototype.setDataSource = function (dataSource) {
     this._dataSource = dataSource;
-    this._initialViewSequence = undefined;
     this._nodesById = undefined;
-    if (dataSource instanceof Array) {
-        this._viewSequence = new ViewSequence(dataSource);
-        this._initialViewSequence = this._viewSequence;
-    } else if (dataSource instanceof ViewSequence || dataSource.getNext) {
+    if (dataSource instanceof ViewSequence) {
+        console.warn('The stock famo.us ViewSequence is no longer supported as it is too buggy');
+        console.warn('It has been automatically converted to the safe LinkedListViewSequence.');
+        console.warn('Please refactor your code by using LinkedListViewSequence.');
+        this._dataSource = new LinkedListViewSequence(dataSource._.array);
+        this._viewSequence = this._dataSource;
+    } else if (dataSource instanceof Array) {
+        this._viewSequence = new LinkedListViewSequence(dataSource);
+    } else if (dataSource instanceof LinkedListViewSequence) {
         this._viewSequence = dataSource;
-        this._initialViewSequence = dataSource;
+    } else if (dataSource.getNext) {
+        this._viewSequence = dataSource;
     } else if (dataSource instanceof Object) {
         this._nodesById = dataSource;
     }
@@ -1848,32 +1893,10 @@ LayoutController.prototype.insert = function (indexOrId, renderable, insertSpec)
         this._nodesById[indexOrId] = renderable;
     } else {
         if (this._dataSource === undefined) {
-            this._dataSource = [];
-            this._viewSequence = new ViewSequence(this._dataSource);
-            this._initialViewSequence = this._viewSequence;
+            this._dataSource = new LinkedListViewSequence();
+            this._viewSequence = this._dataSource;
         }
-        var dataSource = this._viewSequence || this._dataSource;
-        var array = _getDataSourceArray.call(this);
-        if (array && indexOrId === array.length) {
-            indexOrId = -1;
-        }
-        if (indexOrId === -1) {
-            dataSource.push(renderable);
-        } else if (indexOrId === 0) {
-            if (dataSource === this._viewSequence) {
-                dataSource.splice(0, 0, renderable);
-                if (this._viewSequence.getIndex() === 0) {
-                    var nextViewSequence = this._viewSequence.getNext();
-                    if (nextViewSequence && nextViewSequence.get()) {
-                        this._viewSequence = nextViewSequence;
-                    }
-                }
-            } else {
-                dataSource.splice(0, 0, renderable);
-            }
-        } else {
-            dataSource.splice(indexOrId, 0, renderable);
-        }
+        this._viewSequence.insert(indexOrId, renderable);
     }
     if (insertSpec) {
         this._nodes.insertNode(this._nodes.createNode(renderable, insertSpec));
@@ -1889,6 +1912,9 @@ LayoutController.prototype.push = function (renderable, insertSpec) {
     return this.insert(-1, renderable, insertSpec);
 };
 function _getViewSequenceAtIndex(index, startViewSequence) {
+    if (this._viewSequence.getAtIndex) {
+        return this._viewSequence.getAtIndex(index, startViewSequence);
+    }
     var viewSequence = startViewSequence || this._viewSequence;
     var i = viewSequence ? viewSequence.getIndex() : index;
     if (index > i) {
@@ -1920,14 +1946,6 @@ function _getViewSequenceAtIndex(index, startViewSequence) {
     }
     return viewSequence;
 }
-function _getDataSourceArray() {
-    if (Array.isArray(this._dataSource)) {
-        return this._dataSource;
-    } else if (this._viewSequence || this._viewSequence._) {
-        return this._viewSequence._.array;
-    }
-    return undefined;
-}
 LayoutController.prototype.get = function (indexOrId) {
     if (this._nodesById || indexOrId instanceof String || typeof indexOrId === 'string') {
         return this._nodesById ? this._nodesById[indexOrId] : undefined;
@@ -1936,22 +1954,7 @@ LayoutController.prototype.get = function (indexOrId) {
     return viewSequence ? viewSequence.get() : undefined;
 };
 LayoutController.prototype.swap = function (index, index2) {
-    var array = _getDataSourceArray.call(this);
-    if (!array) {
-        throw '.swap is only supported for dataSources of type Array or ViewSequence';
-    }
-    if (index === index2) {
-        return this;
-    }
-    if (index < 0 || index >= array.length) {
-        throw 'Invalid index (' + index + ') specified to .swap';
-    }
-    if (index2 < 0 || index2 >= array.length) {
-        throw 'Invalid second index (' + index2 + ') specified to .swap';
-    }
-    var renderNode = array[index];
-    array[index] = array[index2];
-    array[index2] = renderNode;
+    this._viewSequence.swap(index, index2);
     this._isDirty = true;
     return this;
 };
@@ -1971,33 +1974,24 @@ LayoutController.prototype.replace = function (indexOrId, renderable, noAnimatio
         }
         return oldRenderable;
     }
-    var array = _getDataSourceArray.call(this);
-    if (!array) {
-        return undefined;
-    }
-    if (indexOrId < 0 || indexOrId >= array.length) {
+    var sequence = this._viewSequence.findByIndex(indexOrId);
+    if (!sequence) {
         throw 'Invalid index (' + indexOrId + ') specified to .replace';
     }
-    oldRenderable = array[indexOrId];
+    oldRenderable = sequence.get();
+    sequence.set(renderable);
     if (oldRenderable !== renderable) {
-        array[indexOrId] = renderable;
         this._isDirty = true;
     }
     return oldRenderable;
 };
 LayoutController.prototype.move = function (index, newIndex) {
-    var array = _getDataSourceArray.call(this);
-    if (!array) {
-        throw '.move is only supported for dataSources of type Array or ViewSequence';
-    }
-    if (index < 0 || index >= array.length) {
+    var sequence = this._viewSequence.findByIndex(index);
+    if (!sequence) {
         throw 'Invalid index (' + index + ') specified to .move';
     }
-    if (newIndex < 0 || newIndex >= array.length) {
-        throw 'Invalid newIndex (' + newIndex + ') specified to .move';
-    }
-    var item = array.splice(index, 1)[0];
-    array.splice(newIndex, 0, item);
+    this._viewSequence = this._viewSequence.remove(sequence);
+    this._viewSequence.insert(newIndex, sequence.get());
     this._isDirty = true;
     return this;
 };
@@ -2018,25 +2012,17 @@ LayoutController.prototype.remove = function (indexOrId, removeSpec) {
                 }
             }
         }
-    } else if (indexOrId instanceof Number || typeof indexOrId === 'number') {
-        var array = _getDataSourceArray.call(this);
-        if (!array || indexOrId < 0 || indexOrId >= array.length) {
-            throw 'Invalid index (' + indexOrId + ') specified to .remove (or dataSource doesn\'t support remove)';
-        }
-        renderNode = array[indexOrId];
-        this._dataSource.splice(indexOrId, 1);
     } else {
-        indexOrId = this._dataSource.indexOf(indexOrId);
-        if (indexOrId >= 0) {
-            this._dataSource.splice(indexOrId, 1);
-            renderNode = indexOrId;
+        var sequence;
+        if (indexOrId instanceof Number || typeof indexOrId === 'number') {
+            sequence = this._viewSequence.findByIndex(indexOrId);
+        } else {
+            sequence = this._viewSequence.findByValue(indexOrId);
         }
-    }
-    if (this._viewSequence && renderNode) {
-        var viewSequence = _getViewSequenceAtIndex.call(this, this._viewSequence.getIndex(), this._initialViewSequence);
-        viewSequence = viewSequence || _getViewSequenceAtIndex.call(this, this._viewSequence.getIndex() - 1, this._initialViewSequence);
-        viewSequence = viewSequence || this._dataSource;
-        this._viewSequence = viewSequence;
+        if (sequence) {
+            renderNode = sequence.get();
+            this._viewSequence = this._viewSequence.remove(sequence);
+        }
     }
     if (renderNode && removeSpec) {
         var node = this._nodes.getNodeByRenderNode(renderNode);
@@ -2059,8 +2045,8 @@ LayoutController.prototype.removeAll = function (removeSpec) {
         if (dirty) {
             this._isDirty = true;
         }
-    } else if (this._dataSource) {
-        this.setDataSource([]);
+    } else if (this._viewSequence) {
+        this._viewSequence = this._viewSequence.clear();
     }
     if (removeSpec) {
         var node = this._nodes.getStartEnumNode();
@@ -2187,7 +2173,7 @@ LayoutController.prototype.cleanup = function (context) {
     }
 };
 module.exports = LayoutController;
-},{"./FlowLayoutNode":3,"./LayoutNode":6,"./LayoutNodeManager":7,"./LayoutUtility":8,"./helpers/LayoutDockHelper":11}],6:[function(require,module,exports){
+},{"./FlowLayoutNode":3,"./LayoutNode":6,"./LayoutNodeManager":7,"./LayoutUtility":8,"./LinkedListViewSequence":9,"./helpers/LayoutDockHelper":12}],6:[function(require,module,exports){
 var Transform = window.famous.core.Transform;
 var LayoutUtility = require('./LayoutUtility');
 function LayoutNode(renderNode, spec) {
@@ -3032,6 +3018,211 @@ LayoutUtility.getRegisteredHelper = function (name) {
 };
 module.exports = LayoutUtility;
 },{}],9:[function(require,module,exports){
+function LinkedListViewSequence(items) {
+    if (Array.isArray(items)) {
+        this._ = new this.constructor.Backing(this);
+        for (var i = 0; i < items.length; i++) {
+            this.push(items[i]);
+        }
+    } else {
+        this._ = items || new this.constructor.Backing(this);
+    }
+}
+LinkedListViewSequence.Backing = function Backing() {
+    this.length = 0;
+};
+LinkedListViewSequence.prototype.getHead = function () {
+    return this._.head;
+};
+LinkedListViewSequence.prototype.getTail = function () {
+    return this._.tail;
+};
+LinkedListViewSequence.prototype.getPrevious = function () {
+    return this._prev;
+};
+LinkedListViewSequence.prototype.getNext = function () {
+    return this._next;
+};
+LinkedListViewSequence.prototype.get = function () {
+    return this._value;
+};
+LinkedListViewSequence.prototype.set = function (value) {
+    this._value = value;
+    return this;
+};
+LinkedListViewSequence.prototype.getIndex = function () {
+    return this._value ? this.indexOf(this._value) : 0;
+};
+LinkedListViewSequence.prototype.toString = function () {
+    return '' + this.getIndex();
+};
+LinkedListViewSequence.prototype.indexOf = function (item) {
+    var sequence = this._.head;
+    var index = 0;
+    while (sequence) {
+        if (sequence._value === item) {
+            return index;
+        }
+        index++;
+        sequence = sequence._next;
+    }
+    return -1;
+};
+LinkedListViewSequence.prototype.findByIndex = function (index) {
+    index = index === -1 ? this._.length - 1 : index;
+    if (index < 0 || index >= this._.length) {
+        return undefined;
+    }
+    var searchIndex;
+    var searchSequence;
+    if (index > this._.length / 2) {
+        searchSequence = this._.tail;
+        searchIndex = this._.length - 1;
+        while (searchIndex > index) {
+            searchSequence = searchSequence._prev;
+            searchIndex--;
+        }
+    } else {
+        searchSequence = this._.head;
+        searchIndex = 0;
+        while (searchIndex < index) {
+            searchSequence = searchSequence._next;
+            searchIndex++;
+        }
+    }
+    return searchSequence;
+};
+LinkedListViewSequence.prototype.findByValue = function (value) {
+    var sequence = this._.head;
+    while (sequence) {
+        if (sequence.get() === value) {
+            return sequence;
+        }
+        sequence = sequence._next;
+    }
+    return undefined;
+};
+LinkedListViewSequence.prototype.insert = function (index, renderNode) {
+    index = index === -1 ? this._.length : index;
+    if (!this._.length) {
+        assert(index === 0, 'inserting in empty view-sequence, but not at index 0 (but ' + index + ' instead)');
+        this._value = renderNode;
+        this._.head = this;
+        this._.tail = this;
+        this._.length = 1;
+        return this;
+    }
+    var sequence;
+    if (index === 0) {
+        sequence = new LinkedListViewSequence(this._);
+        sequence._value = renderNode;
+        sequence._next = this._.head;
+        this._.head._prev = sequence;
+        this._.head = sequence;
+    } else if (index === this._.length) {
+        sequence = new LinkedListViewSequence(this._);
+        sequence._value = renderNode;
+        sequence._prev = this._.tail;
+        this._.tail._next = sequence;
+        this._.tail = sequence;
+    } else {
+        var searchIndex;
+        var searchSequence;
+        assert(index > 0 && index < this._.length, 'invalid insert index: ' + index + ' (length: ' + this._.length + ')');
+        if (index > this._.length / 2) {
+            searchSequence = this._.tail;
+            searchIndex = this._.length - 1;
+            while (searchIndex >= index) {
+                searchSequence = searchSequence._prev;
+                searchIndex--;
+            }
+        } else {
+            searchSequence = this._.head;
+            searchIndex = 1;
+            while (searchIndex < index) {
+                searchSequence = searchSequence._next;
+                searchIndex++;
+            }
+        }
+        sequence = new LinkedListViewSequence(this._);
+        sequence._value = renderNode;
+        sequence._prev = searchSequence;
+        sequence._next = searchSequence._next;
+        searchSequence._next._prev = sequence;
+        searchSequence._next = sequence;
+    }
+    this._.length++;
+    return sequence;
+};
+LinkedListViewSequence.prototype.remove = function (sequence) {
+    if (sequence._prev && sequence._next) {
+        sequence._prev._next = sequence._next;
+        sequence._next._prev = sequence._prev;
+        this._.length--;
+        return sequence === this ? sequence._prev : this;
+    } else if (!sequence._prev && !sequence._next) {
+        assert(sequence === this, 'only one sequence exists, should be this one');
+        assert(this._value, 'last node should have a value');
+        assert(this._.head, 'head is invalid');
+        assert(this._.tail, 'tail is invalid');
+        assert(this._.length === 1, 'length should be 1');
+        this._value = undefined;
+        this._.head = undefined;
+        this._.tail = undefined;
+        this._.length--;
+        return this;
+    } else if (!sequence._prev) {
+        assert(this._.head === sequence, 'head is invalid');
+        sequence._next._prev = undefined;
+        this._.head = sequence._next;
+        this._.length--;
+        return sequence === this ? this._.head : this;
+    } else {
+        assert(!sequence._next, 'next should be empty');
+        assert(this._.tail === sequence, 'tail is invalid');
+        sequence._prev._next = undefined;
+        this._.tail = sequence._prev;
+        this._.length--;
+        return sequence === this ? this._.tail : this;
+    }
+};
+LinkedListViewSequence.prototype.getLength = function () {
+    return this._.length;
+};
+LinkedListViewSequence.prototype.clear = function () {
+    var sequence = this;
+    while (this._.length) {
+        sequence = sequence.remove(this._.tail);
+    }
+    return sequence;
+};
+LinkedListViewSequence.prototype.unshift = function (renderNode) {
+    return this.insert(0, renderNode);
+};
+LinkedListViewSequence.prototype.push = function (renderNode) {
+    return this.insert(-1, renderNode);
+};
+LinkedListViewSequence.prototype.splice = function (index, remove, items) {
+    if (console.error) {
+        console.error('LinkedListViewSequence.splice is not supported');
+    }
+};
+LinkedListViewSequence.prototype.swap = function (index, index2) {
+    var sequence1 = this.findByIndex(index);
+    if (!sequence1) {
+        throw new Error('Invalid first index specified to swap: ' + index);
+    }
+    var sequence2 = this.findByIndex(index2);
+    if (!sequence2) {
+        throw new Error('Invalid second index specified to swap: ' + index2);
+    }
+    var swap = sequence1._value;
+    sequence1._value = sequence2._value;
+    sequence2._value = swap;
+    return this;
+};
+module.exports = LinkedListViewSequence;
+},{}],10:[function(require,module,exports){
 var LayoutUtility = require('./LayoutUtility');
 var LayoutController = require('./LayoutController');
 var LayoutNode = require('./LayoutNode');
@@ -3047,7 +3238,7 @@ var Particle = window.famous.physics.bodies.Particle;
 var Drag = window.famous.physics.forces.Drag;
 var Spring = window.famous.physics.forces.Spring;
 var ScrollSync = window.famous.inputs.ScrollSync;
-var ViewSequence = window.famous.core.ViewSequence;
+var LinkedListViewSequence = require('./LinkedListViewSequence');
 var Bounds = {
         NONE: 0,
         PREV: 1,
@@ -3074,7 +3265,7 @@ function ScrollController(options) {
     LayoutController.call(this, options, layoutManager);
     this._scroll = {
         activeTouches: [],
-        pe: new PhysicsEngine(),
+        pe: new PhysicsEngine(this.options.scrollPhysicsEngine),
         particle: new Particle(this.options.scrollParticle),
         dragForce: new Drag(this.options.scrollDrag),
         frictionForce: new Drag(this.options.scrollFriction),
@@ -3143,6 +3334,7 @@ ScrollController.PaginationMode = PaginationMode;
 ScrollController.DEFAULT_OPTIONS = {
     useContainer: false,
     container: { properties: { overflow: 'hidden' } },
+    scrollPhysicsEngine: {},
     scrollParticle: {},
     scrollDrag: {
         forceFunction: Drag.FORCE_FUNCTIONS.QUADRATIC,
@@ -3414,6 +3606,9 @@ function _setParticle(position, velocity, phase) {
     if (position !== undefined) {
         this._scroll.particleValue = position;
         this._scroll.particle.setPosition1D(position);
+        if (this._scroll.springValue !== undefined) {
+            this._scroll.pe.wake();
+        }
     }
     if (velocity !== undefined) {
         var oldVelocity = this._scroll.particle.getVelocity1D();
@@ -3682,8 +3877,10 @@ function _normalizePrevViewSequence(scrollOffset) {
             if (this.options.alignment) {
                 normalizeNextPrev = scrollOffset >= 0;
             } else {
-                this._viewSequence = node._viewSequence;
-                normalizedScrollOffset = scrollOffset;
+                if (Math.round(scrollOffset) >= 0) {
+                    this._viewSequence = node._viewSequence;
+                    normalizedScrollOffset = scrollOffset;
+                }
             }
         }
         node = node._prev;
@@ -3695,7 +3892,7 @@ function _normalizeNextViewSequence(scrollOffset) {
     var normalizedScrollOffset = scrollOffset;
     var node = this._nodes.getStartEnumNode(true);
     while (node) {
-        if (!node._invalidated || node.scrollLength === undefined || node.trueSizeRequested || !node._viewSequence || scrollOffset > 0 && (!this.options.alignment || node.scrollLength !== 0)) {
+        if (!node._invalidated || node.scrollLength === undefined || node.trueSizeRequested || !node._viewSequence || Math.round(scrollOffset) > 0 && (!this.options.alignment || node.scrollLength !== 0)) {
             break;
         }
         if (this.options.alignment) {
@@ -3978,7 +4175,7 @@ ScrollController.prototype.goToRenderNode = function (node, noAnimation) {
     return this;
 };
 ScrollController.prototype.ensureVisible = function (node) {
-    if (node instanceof ViewSequence) {
+    if (node instanceof LinkedListViewSequence) {
         node = node.get();
     } else if (node instanceof Number || typeof node === 'number') {
         var viewSequence = this._viewSequence;
@@ -4159,6 +4356,17 @@ function _layout(size, scrollOffset, nested) {
     this._debug.layoutCount++;
     var scrollStart = 0 - Math.max(this.options.extraBoundsSpace[0], 1);
     var scrollEnd = size[this._direction] + Math.max(this.options.extraBoundsSpace[1], 1);
+    if (this.options.paginated && this.options.paginationMode === PaginationMode.PAGE) {
+        scrollStart = scrollOffset - this.options.extraBoundsSpace[0];
+        scrollEnd = scrollOffset + size[this._direction] + this.options.extraBoundsSpace[1];
+        if (scrollOffset + size[this._direction] < 0) {
+            scrollStart += size[this._direction];
+            scrollEnd += size[this._direction];
+        } else if (scrollOffset - size[this._direction] > 0) {
+            scrollStart -= size[this._direction];
+            scrollEnd -= size[this._direction];
+        }
+    }
     if (this.options.layoutAll) {
         scrollStart = -1000000;
         scrollEnd = 1000000;
@@ -4343,7 +4551,7 @@ ScrollController.prototype.render = function render() {
     }
 };
 module.exports = ScrollController;
-},{"./FlowLayoutNode":3,"./LayoutController":5,"./LayoutNode":6,"./LayoutNodeManager":7,"./LayoutUtility":8}],10:[function(require,module,exports){
+},{"./FlowLayoutNode":3,"./LayoutController":5,"./LayoutNode":6,"./LayoutNodeManager":7,"./LayoutUtility":8,"./LinkedListViewSequence":9}],11:[function(require,module,exports){
 var EventHandler = window.famous.core.EventHandler;
 function VirtualViewSequence(options) {
     options = options || {};
@@ -4466,8 +4674,18 @@ VirtualViewSequence.prototype.swap = function () {
         console.error('VirtualViewSequence.swap is not supported and should not be called');
     }
 };
+VirtualViewSequence.prototype.insert = function () {
+    if (console.error) {
+        console.error('VirtualViewSequence.insert is not supported and should not be called');
+    }
+};
+VirtualViewSequence.prototype.remove = function () {
+    if (console.error) {
+        console.error('VirtualViewSequence.remove is not supported and should not be called');
+    }
+};
 module.exports = VirtualViewSequence;
-},{}],11:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 var LayoutUtility = require('../LayoutUtility');
 function LayoutDockHelper(context, options) {
     var size = context.size;
@@ -4670,7 +4888,7 @@ LayoutDockHelper.prototype.get = function () {
 };
 LayoutUtility.registerHelper('dock', LayoutDockHelper);
 module.exports = LayoutDockHelper;
-},{"../LayoutUtility":8}],12:[function(require,module,exports){
+},{"../LayoutUtility":8}],13:[function(require,module,exports){
 var Utility = window.famous.utilities.Utility;
 var LayoutUtility = require('../LayoutUtility');
 var capabilities = {
@@ -4839,7 +5057,7 @@ function CollectionLayout(context_, options) {
     } else {
         itemSize = options.itemSize;
     }
-    offset = context.scrollOffset + (alignment ? 0 : margin[alignment]);
+    offset = context.scrollOffset + margin[alignment] + (alignment ? spacing[direction] : 0);
     bound = context.scrollEnd + (alignment ? 0 : margin[alignment]);
     lineOffset = 0;
     lineNodes = [];
@@ -4851,7 +5069,7 @@ function CollectionLayout(context_, options) {
         }
         nodeSize = _resolveNodeSize(node);
         lineOffset += (lineNodes.length ? spacing[lineDirection] : 0) + nodeSize[lineDirection];
-        if (lineOffset > lineLength) {
+        if (Math.round(lineOffset * 100) / 100 > lineLength) {
             offset += _layoutLine(true, !node);
             lineOffset = nodeSize[lineDirection];
         }
@@ -4860,7 +5078,7 @@ function CollectionLayout(context_, options) {
             size: nodeSize
         });
     }
-    offset = context.scrollOffset + (alignment ? margin[alignment] : 0);
+    offset = context.scrollOffset + margin[alignment] - (alignment ? 0 : spacing[direction]);
     bound = context.scrollStart + (alignment ? margin[alignment] : 0);
     lineOffset = 0;
     lineNodes = [];
@@ -4872,7 +5090,7 @@ function CollectionLayout(context_, options) {
         }
         nodeSize = _resolveNodeSize(node);
         lineOffset += (lineNodes.length ? spacing[lineDirection] : 0) + nodeSize[lineDirection];
-        if (lineOffset > lineLength) {
+        if (Math.round(lineOffset * 100) / 100 > lineLength) {
             offset -= _layoutLine(false, !node);
             lineOffset = nodeSize[lineDirection];
         }
@@ -4886,31 +5104,45 @@ CollectionLayout.Capabilities = capabilities;
 CollectionLayout.Name = 'CollectionLayout';
 CollectionLayout.Description = 'Multi-cell collection-layout with margins & spacing';
 module.exports = CollectionLayout;
-},{"../LayoutUtility":8}],13:[function(require,module,exports){
+},{"../LayoutUtility":8}],14:[function(require,module,exports){
 var Utility = window.famous.utilities.Utility;
 var capabilities = {
         sequence: true,
         direction: [
-            Utility.Direction.X,
-            Utility.Direction.Y
+            Utility.Direction.Y,
+            Utility.Direction.X
         ],
         scrolling: true,
+        trueSize: true,
         sequentialScrollingOptimized: false
     };
-function CoverLayout(context, options) {
-    var node = context.next();
-    if (!node) {
-        return;
-    }
-    var size = context.size;
-    var direction = context.direction;
-    var itemSize = options.itemSize;
-    var opacityStep = 0.2;
-    var scaleStep = 0.1;
-    var translateStep = 30;
-    var zStart = 100;
-    context.set(node, {
-        size: itemSize,
+var size;
+var direction;
+var revDirection;
+var node;
+var itemSize;
+var offset;
+var bound;
+var angle;
+var itemAngle;
+var radialOpacity;
+var zOffset;
+var set = {
+        opacity: 1,
+        size: [
+            0,
+            0
+        ],
+        translate: [
+            0,
+            0,
+            0
+        ],
+        rotate: [
+            0,
+            0,
+            0
+        ],
         origin: [
             0.5,
             0.5
@@ -4919,81 +5151,71 @@ function CoverLayout(context, options) {
             0.5,
             0.5
         ],
-        translate: [
-            0,
-            0,
-            zStart
-        ],
-        scrollLength: itemSize[direction]
-    });
-    var translate = itemSize[0] / 2;
-    var opacity = 1 - opacityStep;
-    var zIndex = zStart - 1;
-    var scale = 1 - scaleStep;
-    var prev = false;
-    var endReached = false;
-    node = context.next();
-    if (!node) {
-        node = context.prev();
-        prev = true;
+        scrollLength: undefined
+    };
+function CoverLayout(context, options) {
+    size = context.size;
+    zOffset = options.zOffset;
+    itemAngle = options.itemAngle;
+    direction = context.direction;
+    revDirection = direction ? 0 : 1;
+    itemSize = options.itemSize || size[direction] / 2;
+    radialOpacity = options.radialOpacity === undefined ? 1 : options.radialOpacity;
+    set.opacity = 1;
+    set.size[0] = size[0];
+    set.size[1] = size[1];
+    set.size[revDirection] = itemSize;
+    set.size[direction] = itemSize;
+    set.translate[0] = 0;
+    set.translate[1] = 0;
+    set.translate[2] = 0;
+    set.rotate[0] = 0;
+    set.rotate[1] = 0;
+    set.rotate[2] = 0;
+    set.scrollLength = itemSize;
+    offset = context.scrollOffset;
+    bound = Math.PI / 2 / itemAngle * itemSize + itemSize;
+    while (offset <= bound) {
+        node = context.next();
+        if (!node) {
+            break;
+        }
+        if (offset >= -bound) {
+            set.translate[direction] = offset;
+            set.translate[2] = Math.abs(offset) > itemSize ? -zOffset : -(Math.abs(offset) * (zOffset / itemSize));
+            set.rotate[revDirection] = Math.abs(offset) > itemSize ? itemAngle : Math.abs(offset) * (itemAngle / itemSize);
+            if (offset > 0 && !direction || offset < 0 && direction) {
+                set.rotate[revDirection] = 0 - set.rotate[revDirection];
+            }
+            set.opacity = 1 - Math.abs(angle) / (Math.PI / 2) * (1 - radialOpacity);
+            context.set(node, set);
+        }
+        offset += itemSize;
     }
-    while (node) {
-        context.set(node, {
-            size: itemSize,
-            origin: [
-                0.5,
-                0.5
-            ],
-            align: [
-                0.5,
-                0.5
-            ],
-            translate: direction ? [
-                0,
-                prev ? -translate : translate,
-                zIndex
-            ] : [
-                prev ? -translate : translate,
-                0,
-                zIndex
-            ],
-            scale: [
-                scale,
-                scale,
-                1
-            ],
-            opacity: opacity,
-            scrollLength: itemSize[direction]
-        });
-        opacity -= opacityStep;
-        scale -= scaleStep;
-        translate += translateStep;
-        zIndex--;
-        if (translate >= size[direction] / 2) {
-            endReached = true;
-        } else {
-            node = prev ? context.prev() : context.next();
-            endReached = !node;
+    offset = context.scrollOffset - itemSize;
+    while (offset >= -bound) {
+        node = context.prev();
+        if (!node) {
+            break;
         }
-        if (endReached) {
-            if (prev) {
-                break;
+        if (offset <= bound) {
+            set.translate[direction] = offset;
+            set.translate[2] = Math.abs(offset) > itemSize ? -zOffset : -(Math.abs(offset) * (zOffset / itemSize));
+            set.rotate[revDirection] = Math.abs(offset) > itemSize ? itemAngle : Math.abs(offset) * (itemAngle / itemSize);
+            if (offset > 0 && !direction || offset < 0 && direction) {
+                set.rotate[revDirection] = 0 - set.rotate[revDirection];
             }
-            endReached = false;
-            prev = true;
-            node = context.prev();
-            if (node) {
-                translate = itemSize[direction] / 2;
-                opacity = 1 - opacityStep;
-                zIndex = zStart - 1;
-                scale = 1 - scaleStep;
-            }
+            set.opacity = 1 - Math.abs(angle) / (Math.PI / 2) * (1 - radialOpacity);
+            context.set(node, set);
         }
+        offset -= itemSize;
     }
 }
 CoverLayout.Capabilities = capabilities;
+CoverLayout.Name = 'CoverLayout';
+CoverLayout.Description = 'CoverLayout';
 module.exports = CoverLayout;
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 module.exports = function CubeLayout(context, options) {
     var itemSize = options.itemSize;
     context.set(context.next(), {
@@ -5065,12 +5287,12 @@ module.exports = function CubeLayout(context, options) {
         ]
     });
 };
-},{}],15:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 if (console.warn) {
     console.warn('GridLayout has been deprecated and will be removed in the future, use CollectionLayout instead');
 }
 module.exports = require('./CollectionLayout');
-},{"./CollectionLayout":12}],16:[function(require,module,exports){
+},{"./CollectionLayout":13}],17:[function(require,module,exports){
 var LayoutDockHelper = require('../helpers/LayoutDockHelper');
 module.exports = function HeaderFooterLayout(context, options) {
     var dock = new LayoutDockHelper(context, options);
@@ -5078,7 +5300,7 @@ module.exports = function HeaderFooterLayout(context, options) {
     dock.bottom('footer', options.footerSize !== undefined ? options.footerSize : options.footerHeight);
     dock.fill('content');
 };
-},{"../helpers/LayoutDockHelper":11}],17:[function(require,module,exports){
+},{"../helpers/LayoutDockHelper":12}],18:[function(require,module,exports){
 var Utility = window.famous.utilities.Utility;
 var LayoutUtility = require('../LayoutUtility');
 var capabilities = {
@@ -5129,6 +5351,9 @@ function ListLayout(context, options) {
     var lastCellOffsetInFirstVisibleSection;
     var isSectionCallback = options.isSectionCallback;
     var bound;
+    if (spacing && typeof spacing !== 'number') {
+        console.log('Famous-flex warning: ListLayout was initialized with a non-numeric spacing option. ' + 'The CollectionLayout supports an array spacing argument, but the ListLayout does not.');
+    }
     set.size[0] = size[0];
     set.size[1] = size[1];
     set.size[revDirection] -= margins[1 - revDirection] + margins[3 - revDirection];
@@ -5153,7 +5378,7 @@ function ListLayout(context, options) {
         if (!node) {
             break;
         }
-        nodeSize = getItemSize ? getItemSize(node.renderNode) : itemSize;
+        nodeSize = getItemSize ? getItemSize(node.renderNode, context.size) : itemSize;
         nodeSize = nodeSize === true ? context.resolveSize(node, size)[direction] : nodeSize;
         set.size[direction] = nodeSize;
         set.translate[direction] = offset + (alignment ? spacing : 0);
@@ -5192,7 +5417,7 @@ function ListLayout(context, options) {
         if (!node) {
             break;
         }
-        nodeSize = getItemSize ? getItemSize(node.renderNode) : itemSize;
+        nodeSize = getItemSize ? getItemSize(node.renderNode, context.size) : itemSize;
         nodeSize = nodeSize === true ? context.resolveSize(node, size)[direction] : nodeSize;
         set.scrollLength = nodeSize + spacing;
         offset -= set.scrollLength;
@@ -5256,7 +5481,7 @@ ListLayout.Capabilities = capabilities;
 ListLayout.Name = 'ListLayout';
 ListLayout.Description = 'List-layout with margins, spacing and sticky headers';
 module.exports = ListLayout;
-},{"../LayoutUtility":8}],18:[function(require,module,exports){
+},{"../LayoutUtility":8}],19:[function(require,module,exports){
 var LayoutDockHelper = require('../helpers/LayoutDockHelper');
 module.exports = function NavBarLayout(context, options) {
     var dock = new LayoutDockHelper(context, {
@@ -5312,7 +5537,7 @@ module.exports = function NavBarLayout(context, options) {
         });
     }
 };
-},{"../helpers/LayoutDockHelper":11}],19:[function(require,module,exports){
+},{"../helpers/LayoutDockHelper":12}],20:[function(require,module,exports){
 var Utility = window.famous.utilities.Utility;
 var capabilities = {
         sequence: true,
@@ -5367,7 +5592,7 @@ function ProportionalLayout(context, options) {
 }
 ProportionalLayout.Capabilities = capabilities;
 module.exports = ProportionalLayout;
-},{}],20:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 var Utility = window.famous.utilities.Utility;
 var LayoutUtility = require('../LayoutUtility');
 var capabilities = {
@@ -5485,7 +5710,7 @@ TabBarLayout.Capabilities = capabilities;
 TabBarLayout.Name = 'TabBarLayout';
 TabBarLayout.Description = 'TabBar widget layout';
 module.exports = TabBarLayout;
-},{"../LayoutUtility":8}],21:[function(require,module,exports){
+},{"../LayoutUtility":8}],22:[function(require,module,exports){
 var Utility = window.famous.utilities.Utility;
 var capabilities = {
         sequence: true,
@@ -5594,7 +5819,7 @@ WheelLayout.Capabilities = capabilities;
 WheelLayout.Name = 'WheelLayout';
 WheelLayout.Description = 'Spinner-wheel/slot-machine layout';
 module.exports = WheelLayout;
-},{}],22:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 var View = window.famous.core.View;
 var Surface = window.famous.core.Surface;
 var Utility = window.famous.utilities.Utility;
@@ -5882,7 +6107,7 @@ function _createOverlay() {
     this.add(this.overlay);
 }
 module.exports = DatePicker;
-},{"../LayoutController":5,"../LayoutUtility":8,"../ScrollController":9,"../VirtualViewSequence":10,"../layouts/ProportionalLayout":19,"../layouts/WheelLayout":21,"./DatePickerComponents":23}],23:[function(require,module,exports){
+},{"../LayoutController":5,"../LayoutUtility":8,"../ScrollController":10,"../VirtualViewSequence":11,"../layouts/ProportionalLayout":20,"../layouts/WheelLayout":22,"./DatePickerComponents":24}],24:[function(require,module,exports){
 var Surface = window.famous.core.Surface;
 var EventHandler = window.famous.core.EventHandler;
 function decimal1(date) {
@@ -6170,7 +6395,7 @@ module.exports = {
     Second: Second,
     Millisecond: Millisecond
 };
-},{}],24:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 var Surface = window.famous.core.Surface;
 var View = window.famous.core.View;
 var LayoutController = require('../LayoutController');
@@ -6332,7 +6557,7 @@ TabBar.prototype.getSize = function () {
     return this.options.size || (this.layout ? this.layout.getSize() : View.prototype.getSize.call(this));
 };
 module.exports = TabBar;
-},{"../LayoutController":5,"../layouts/TabBarLayout":20}],25:[function(require,module,exports){
+},{"../LayoutController":5,"../layouts/TabBarLayout":21}],26:[function(require,module,exports){
 var View = window.famous.core.View;
 var AnimationController = require('../AnimationController');
 var TabBar = require('./TabBar');
@@ -6460,7 +6685,7 @@ TabBarController.prototype.getSelectedItemIndex = function () {
     return this.tabBar.getSelectedItemIndex();
 };
 module.exports = TabBarController;
-},{"../AnimationController":1,"../LayoutController":5,"../helpers/LayoutDockHelper":11,"./TabBar":24}],26:[function(require,module,exports){
+},{"../AnimationController":1,"../LayoutController":5,"../helpers/LayoutDockHelper":12,"./TabBar":25}],27:[function(require,module,exports){
 if (typeof famousflex === 'undefined') {
     famousflex = {};
 }
@@ -6495,4 +6720,4 @@ famousflex.layouts.WheelLayout = require('./src/layouts/WheelLayout');
 famousflex.helpers = famousflex.helpers || {};
 famousflex.helpers.LayoutDockHelper = require('./src/helpers/LayoutDockHelper');
 
-},{"./src/AnimationController":1,"./src/FlexScrollView":2,"./src/FlowLayoutNode":3,"./src/LayoutContext":4,"./src/LayoutController":5,"./src/LayoutNode":6,"./src/LayoutNodeManager":7,"./src/LayoutUtility":8,"./src/ScrollController":9,"./src/VirtualViewSequence":10,"./src/helpers/LayoutDockHelper":11,"./src/layouts/CollectionLayout":12,"./src/layouts/CoverLayout":13,"./src/layouts/CubeLayout":14,"./src/layouts/GridLayout":15,"./src/layouts/HeaderFooterLayout":16,"./src/layouts/ListLayout":17,"./src/layouts/NavBarLayout":18,"./src/layouts/ProportionalLayout":19,"./src/layouts/WheelLayout":21,"./src/widgets/DatePicker":22,"./src/widgets/TabBar":24,"./src/widgets/TabBarController":25}]},{},[26]);
+},{"./src/AnimationController":1,"./src/FlexScrollView":2,"./src/FlowLayoutNode":3,"./src/LayoutContext":4,"./src/LayoutController":5,"./src/LayoutNode":6,"./src/LayoutNodeManager":7,"./src/LayoutUtility":8,"./src/ScrollController":10,"./src/VirtualViewSequence":11,"./src/helpers/LayoutDockHelper":12,"./src/layouts/CollectionLayout":13,"./src/layouts/CoverLayout":14,"./src/layouts/CubeLayout":15,"./src/layouts/GridLayout":16,"./src/layouts/HeaderFooterLayout":17,"./src/layouts/ListLayout":18,"./src/layouts/NavBarLayout":19,"./src/layouts/ProportionalLayout":20,"./src/layouts/WheelLayout":22,"./src/widgets/DatePicker":23,"./src/widgets/TabBar":25,"./src/widgets/TabBarController":26}]},{},[27]);
